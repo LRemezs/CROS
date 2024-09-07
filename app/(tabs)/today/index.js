@@ -28,7 +28,6 @@ export default function Today() {
     return [-1, 0, 1].map((adj) => {
       return Array.from({ length: 7 }).map((_, index) => {
         const date = moment(start).add(adj, "week").add(index, "day");
-        console.log(start);
         return {
           weekday: date.format("ddd"),
           date: date.toDate(),
