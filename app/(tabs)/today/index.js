@@ -167,7 +167,7 @@ export default function Today() {
           </View>
         </View>
 
-        {/* Ideas for footer to come */}
+        {/* Show block based on evet */}
         {/* <View style={styles.footer}>
           <TouchableOpacity
             onPress={() => {
