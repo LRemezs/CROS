@@ -1,6 +1,8 @@
+import AntDesign from "@expo/vector-icons/AntDesign";
 import DateTimePicker from "@react-native-community/datetimepicker";
+import * as SQLite from "expo-sqlite/legacy";
 import moment from "moment";
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Dimensions,
   SafeAreaView,
@@ -11,15 +13,106 @@ import {
   View,
 } from "react-native";
 import Swiper from "react-native-swiper";
+import { createTables, verifyTables } from "../../../utils/initOfflineDb.js";
+import { capitalizeFirstLetter } from "../../../utils/qol.js";
 
 const { width } = Dimensions.get("window");
 
 export default function Today() {
+  const db = SQLite.openDatabase("userData1.db");
   const swiper = useRef();
   const [value, setValue] = useState(new Date()); // selected date
   const [week, setWeek] = useState(0); // selected week
   const [show, setShow] = useState(false); // Controls if the DatePicker is visible
   const [selectedDate, setSelectedDate] = useState(new Date()); // Stores the selected date
+  const [dbEvents, setDbEvents] = useState([]); // users oneOff events from DB
+  const [generatedEvents, setGeneratedEvents] = useState([]); // Events generated from SubscriptionTimings
+
+  //Initial DB transactions (create relevant tables for user data)
+  useEffect(() => {
+    createTables(db);
+    verifyTables(db);
+  }, []);
+
+  // Fetch events from the database and generate subscription-based events when the date changes
+  useEffect(() => {
+    fetchDbEvents();
+    generateSubscriptionEvents();
+  }, [value]);
+
+  // Fetch one-off events from the 'events' table
+  const fetchDbEvents = () => {
+    db.transaction((tx) => {
+      tx.executeSql(
+        `SELECT * FROM events WHERE date(startTime) = ?`,
+        [moment(value).format("YYYY-MM-DD")],
+        (_, { rows: { _array } }) => {
+          setDbEvents(_array);
+        },
+        (txObj, error) => console.error("Error fetching events:", error)
+      );
+    });
+  };
+
+  const generateSubscriptionEvents = () => {
+    const selectedDay = moment(value).format("dddd").toLowerCase(); // e.g., 'monday'
+    const nextDay = moment(value).add(1, "day").format("dddd").toLowerCase(); // Get the next day
+
+    db.transaction((tx) => {
+      // First, get the timings for the selected day (current day)
+      tx.executeSql(
+        `SELECT st.startTime AS startTime, st.endTime AS currentEndTime, st.subscriptionId, s.subscriptionName 
+         FROM SubscriptionTimings st
+         JOIN subscriptions s ON st.subscriptionId = s.subscriptionId
+         WHERE st.dayOfTheWeek = ?`,
+        [selectedDay],
+        (_, { rows: { _array: currentDayData } }) => {
+          // Then get the timings for the next day to fetch the correct end time if it's an overnight event
+          tx.executeSql(
+            `SELECT st.startTime AS nextStartTime, st.endTime AS nextEndTime 
+             FROM SubscriptionTimings st
+             WHERE st.dayOfTheWeek = ?`,
+            [nextDay],
+            (_, { rows: { _array: nextDayData } }) => {
+              const generated = currentDayData.map((item) => {
+                const startDate =
+                  moment(value).format("YYYY-MM-DD") + " " + item.startTime;
+                let endDate;
+
+                // Check if the event spans overnight
+                if (item.startTime > item.currentEndTime) {
+                  // Use the next day's end time (wake time)
+                  const nextEndTime = nextDayData[0]?.nextEndTime || "07:00"; // Default to "07:00" if next day's end time not found
+                  endDate =
+                    moment(value).add(1, "day").format("YYYY-MM-DD") +
+                    " " +
+                    nextEndTime;
+                } else {
+                  // Use the same day's end time
+                  endDate =
+                    moment(value).format("YYYY-MM-DD") +
+                    " " +
+                    item.currentEndTime;
+                }
+
+                return {
+                  title: item.subscriptionName,
+                  startTime: startDate,
+                  endTime: endDate,
+                  description: "Generated from SubscriptionTimings",
+                };
+              });
+              setGeneratedEvents(generated);
+            },
+            (txObj, error) =>
+              console.error("Error fetching next day timings:", error)
+          );
+        },
+        (txObj, error) =>
+          console.error("Error fetching current day timings:", error)
+      );
+    });
+  };
 
   //Generating weeks
   const weeks = React.useMemo(() => {
@@ -36,11 +129,74 @@ export default function Today() {
     });
   }, [week]);
 
+  const addEvent = () => {
+    db.transaction((tx) => {
+      tx.executeSql(
+        `INSERT INTO events (title, startTime, endTime, description, location, status) 
+        VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          "Meeting with team", // Event title
+          "2024-09-15 09:00:00", // Start time
+          "2024-09-15 10:00:00", // End time
+          "Weekly team sync-up", // Description
+          "Conference Room A", // Location
+          "Scheduled", // Status
+        ],
+        (txObj, resultSet) => {
+          console.log("Event inserted with ID:", resultSet.insertId);
+          fetchDbEvents(); // Re-fetch events after adding
+        },
+        (txObj, error) => console.error("Error inserting event:", error)
+      );
+    });
+  };
+
+  //TEMPORARY UTILITY FUNCTIONS
+  const dropAllTables = () => {
+    db.transaction((tx) => {
+      // Query to get the names of all tables in the database
+      tx.executeSql(
+        `SELECT name FROM sqlite_master WHERE type='table'`,
+        [],
+        (_, { rows: { _array } }) => {
+          // Loop through each table and drop it
+          _array.forEach((table) => {
+            if (table.name !== "sqlite_sequence") {
+              // 'sqlite_sequence' is used by AUTOINCREMENT, so we don't drop it
+              tx.executeSql(
+                `DROP TABLE IF EXISTS ${table.name}`,
+                [],
+                () => {
+                  console.log(`Table '${table.name}' dropped successfully`);
+                },
+                (tx, error) => {
+                  console.error(`Error dropping table '${table.name}':`, error);
+                }
+              );
+            }
+          });
+        },
+        (tx, error) => {
+          console.error("Error fetching tables:", error);
+        }
+      );
+    });
+  };
+
+  // Combine DB and generated events
+  const allEvents = [...dbEvents, ...generatedEvents];
+
   return (
     <SafeAreaView style={{ flex: 1 }}>
       <View style={styles.container}>
         <View style={styles.header}>
           <Text style={styles.title}>Your Schedule</Text>
+          <TouchableOpacity
+            style={styles.modalCloseButton}
+            onPress={() => dropAllTables()} // Clean the db cache
+          >
+            <AntDesign name="closecircle" size={24} color="black" />
+          </TouchableOpacity>
         </View>
 
         {/* Date picker */}
@@ -107,7 +263,7 @@ export default function Today() {
           </Swiper>
         </View>
 
-        {/*Date selection control */}
+        {/* Date selection control */}
         <View style={styles.controls}>
           <TouchableOpacity
             onPress={() => {
@@ -157,28 +313,37 @@ export default function Today() {
           )}
         </View>
 
-        {/*Main area where either current task (if today) or overall task schedule if other day is visible*/}
+        {/* Main area where either current task (if today) or overall task schedule if other day is visible */}
         <View style={{ flex: 1, paddingHorizontal: 16, paddingVertical: 24 }}>
           <Text style={styles.subtitle}>{value.toDateString()}</Text>
           <View style={styles.placeholder}>
             <View style={styles.placeholderInset}>
-              {/* Replace with your content */}
+              {/* Display all events (one-off and subscription-based) */}
+              {allEvents.map((event, index) => (
+                <View key={index} style={styles.eventContainer}>
+                  <Text style={styles.eventTitle}>
+                    {capitalizeFirstLetter(event.title)}
+                  </Text>
+                  <Text style={styles.eventTime}>
+                    {moment(event.startTime).format("HH:mm")} -{" "}
+                    {moment(event.endTime).format("HH:mm")}
+                  </Text>
+                  <Text style={styles.eventDescription}>
+                    {event.description}
+                  </Text>
+                </View>
+              ))}
             </View>
           </View>
         </View>
 
-        {/* Show block based on evet */}
-        {/* <View style={styles.footer}>
-          <TouchableOpacity
-            onPress={() => {
-              // handle onPress
-            }}
-          >
+        <View style={styles.footer}>
+          <TouchableOpacity onPress={addEvent}>
             <View style={styles.btn}>
               <Text style={styles.btnText}>Schedule</Text>
             </View>
           </TouchableOpacity>
-        </View> */}
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -307,5 +472,26 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     fontWeight: "600",
     color: "#fff",
+  },
+  /** Event display */
+  eventContainer: {
+    padding: 10,
+    marginVertical: 5,
+    backgroundColor: "#f5f5f5",
+    borderRadius: 5,
+  },
+  eventTitle: {
+    fontSize: 16,
+    fontWeight: "bold",
+    marginBottom: 5,
+  },
+  eventTime: {
+    fontSize: 14,
+    color: "#555",
+    marginBottom: 5,
+  },
+  eventDescription: {
+    fontSize: 14,
+    color: "#777",
   },
 });
